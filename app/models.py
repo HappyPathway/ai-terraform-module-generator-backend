@@ -38,10 +38,11 @@ class Module(Base):
     name = Column(String, nullable=False)
     provider = Column(String, nullable=False)
     description = Column(String, nullable=True)
-    source = Column(String)
+    source_url = Column(String)
     published_at = Column(DateTime, default=datetime.utcnow)
     downloads = Column(Integer, default=0)
     verified = Column(Boolean, default=False)
+    owner = Column(String)
 
     versions = relationship("ModuleVersion", back_populates="module")
 
@@ -76,10 +77,10 @@ class ModuleResponse(BaseModel):
     owner: str
     namespace: str
     name: str
-    version: str
+    version: str  # This is from the associated ModuleVersion
     provider: str
     description: Optional[str]
-    source: str
+    source_url: str  # Changed from source to source_url
     published_at: str
     downloads: int
     verified: bool

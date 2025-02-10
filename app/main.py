@@ -3,7 +3,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 from .database import get_db, engine
 from .models.base import Base
-from .models.models import Module, ModuleVersion
+from .models.module import Module, ModuleVersion  # Update import path to use module.py
 from sqlalchemy.orm import Session
 from typing import Dict, Any, List, Optional
 from pydantic import BaseModel
@@ -35,13 +35,13 @@ app = FastAPI(
 # Create database tables
 Base.metadata.create_all(bind=engine)
 
-class ModuleVersion(BaseModel):
+class ModuleVersionSchema(BaseModel):
     version: str
     protocols: List[str]
     platforms: List[dict]
 
 class ModuleVersions(BaseModel):
-    modules: List[ModuleVersion]
+    modules: List[ModuleVersionSchema]
 
 @app.get("/.well-known/terraform.json")
 async def terraform_discovery():
@@ -93,7 +93,27 @@ async def search_modules(
     results = await SearchService.search_modules(
         db, query, provider, namespace, limit, offset
     )
-    response = {"modules": [module.dict() for module in results]}
+    # Convert SQLAlchemy models to Pydantic response models
+    modules = []
+    for module in results:
+        # Get the latest version for each module
+        latest_version = max(module.versions, key=lambda v: v.version) if module.versions else None
+        if latest_version:
+            modules.append({
+                "id": module.id,
+                "owner": module.owner or module.namespace,
+                "namespace": module.namespace,
+                "name": module.name,
+                "version": latest_version.version,
+                "provider": module.provider,
+                "description": module.description or "",
+                "source": latest_version.repository_url or module.source_url or "",
+                "published_at": module.published_at.isoformat(),
+                "downloads": module.downloads,
+                "verified": module.verified
+            })
+    
+    response = {"modules": modules}
     await cache_service.set(cache_key, response)
     return response
 
@@ -209,15 +229,16 @@ async def upload_module(
                     namespace=namespace,
                     name=name,
                     provider=provider,
-                    source=repo_url
+                    description="",
+                    source_url=repo_url
                 )
                 db.add(module)
-                db.flush()  # Flush to get the module.id
+                db.flush()
             
-            # Now create the module version
+            # Create the module version
             module_version = ModuleVersion(
                 id=f"{module_id}-{version}",
-                module_id=module.id,  # Use the module.id from the existing or newly created module
+                module_id=module.id,
                 version=version,
                 protocols=["5.0"],
                 platforms=[{"os": "linux", "arch": "amd64"}],

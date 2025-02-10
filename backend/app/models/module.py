@@ -12,10 +12,11 @@ class Module(Base):
     name = Column(String, nullable=False)
     provider = Column(String, nullable=False)
     description = Column(String, nullable=True)
-    source = Column(String)
+    source_url = Column(String)  # Changed from source to source_url to match models.py
     published_at = Column(DateTime, default=datetime.utcnow)
     downloads = Column(Integer, default=0)
     verified = Column(Boolean, default=False)
+    owner = Column(String)  # Added owner field
     versions = relationship("ModuleVersion", back_populates="module")
 
 class ModuleVersion(Base):

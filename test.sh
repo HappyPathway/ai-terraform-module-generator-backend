@@ -1,0 +1,1 @@
+cd /Users/darnold/git/ai-terraform-module-generator-backend && docker compose down && rm -f modules.db && docker compose up -d && sleep 5 && PYTHONPATH=/Users/darnold/git/ai-terraform-module-generator-backend python3 examples/upload_test_modules.py
