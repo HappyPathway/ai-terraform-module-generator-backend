@@ -1,19 +1,42 @@
-from sqlalchemy import Column, String, Integer, Boolean, DateTime
+from sqlalchemy import Column, String, Integer, Boolean, DateTime, JSON, ForeignKey
 from sqlalchemy.orm import relationship
 from .database import Base
 from datetime import datetime
-from typing import List, Optional
+from typing import List, Optional, Dict, Any
 from pydantic import BaseModel
+
+class ModuleProvider(BaseModel):
+    name: str
+    versions: List[str]
+
+class ModuleVersionBase(BaseModel):
+    version: str
+    protocols: List[str] = ["5.0"]
+    platforms: List[Dict[str, str]] = [{"os": "linux", "arch": "amd64"}]
+    source_zip: Optional[str] = None
+    documentation: Optional[Dict[str, Any]] = None
+    repository_url: Optional[str] = None
+    description: Optional[str] = None
+
+class ModuleVersionCreate(ModuleVersionBase):
+    pass
+
+class ModuleVersionResponse(ModuleVersionBase):
+    id: str
+    module_id: str
+    created_at: datetime
+
+    class Config:
+        from_attributes = True
 
 class Module(Base):
     __tablename__ = "modules"
+    __table_args__ = {'extend_existing': True}
 
     id = Column(String, primary_key=True)
-    owner = Column(String)
-    namespace = Column(String)
-    name = Column(String)
-    version = Column(String)
-    provider = Column(String)
+    namespace = Column(String, nullable=False)
+    name = Column(String, nullable=False)
+    provider = Column(String, nullable=False)
     description = Column(String, nullable=True)
     source = Column(String)
     published_at = Column(DateTime, default=datetime.utcnow)
@@ -24,20 +47,30 @@ class Module(Base):
 
 class ModuleVersion(Base):
     __tablename__ = "module_versions"
+    __table_args__ = {'extend_existing': True}
 
     id = Column(String, primary_key=True)
-    module_id = Column(String, ForeignKey("modules.id"))
-    version = Column(String)
-    protocols = Column(String)  # Stored as JSON string
-    source_zip = Column(String)  # Path to zip file
+    module_id = Column(String, ForeignKey("modules.id"), nullable=False)
+    version = Column(String, nullable=False)
+    protocols = Column(JSON)
+    platforms = Column(JSON)
+    source_zip = Column(String)
+    documentation = Column(JSON)
+    repository_url = Column(String)
+    created_at = Column(DateTime, default=datetime.utcnow)
     
     module = relationship("Module", back_populates="versions")
 
-# Pydantic models for API responses
-class ModuleProvider(BaseModel):
-    name: str
-    versions: List[str]
+class ModuleResponse(Base):
+    __tablename__ = "module_responses"
+    
+    id = Column(Integer, primary_key=True)
+    version_id = Column(String, ForeignKey("module_versions.id"))
+    response_type = Column(String)
+    content = Column(String)
+    created_at = Column(DateTime, default=datetime.utcnow)
 
+# Pydantic models for API responses
 class ModuleResponse(BaseModel):
     id: str
     owner: str

@@ -1,7 +1,12 @@
-from .models import Module, DBModuleVersion
+from .models import *
 
-class ModuleResponse(Module):
-    class Config:
-        orm_mode = True
-
-__all__ = ['Module', 'ModuleResponse', 'DBModuleVersion']
+__all__ = [
+    'Module',
+    'ModuleVersion',
+    'ModuleVersionBase',
+    'ModuleVersionCreate',
+    'ModuleVersionResponse',
+    'ModuleResponse',
+    'ModuleProvider',
+    'ModuleDetail'
+]

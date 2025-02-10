@@ -1,23 +1,26 @@
-from fastapi import FastAPI, Depends, HTTPException, Request, UploadFile, File
+from fastapi import FastAPI, File, HTTPException, Depends, Request, UploadFile
+from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
+from .database import get_db, engine
+from .models.base import Base
+from .models.models import Module, ModuleVersion
 from sqlalchemy.orm import Session
-from typing import Optional, List, Dict
+from typing import Dict, Any, List, Optional
 from pydantic import BaseModel
-import json, os, logging, tempfile
+from datetime import datetime
 from pathlib import Path
-from .database import get_db, engine, Base
-from .models import Module, ModuleResponse, DBModuleVersion
-from .storage import ModuleStorage
+from .auth import check_permissions, Permission, verify_token
+from .cache import CacheService, get_cache_service, get_redis_client
+from .rate_limiter import RateLimiter, get_rate_limiter
+from .stats import StatsTracker, get_stats_tracker
 from .validation import ModuleValidator
-from .github import GitHubService
+from .storage import ModuleStorage
 from .docs import DocGenerator
-from .auth.auth import verify_token
-from .auth.dependencies import check_permissions, Permission
-from .cache import CacheService
+from .github import GitHubService
 from .search import SearchService
-from .middleware import RateLimiter
-from .stats import StatsTracker
 from .dependencies import DependencyManager
+import logging
+import os
 
 # Configure logging
 logging.basicConfig(level=logging.DEBUG)
@@ -49,7 +52,11 @@ async def terraform_discovery():
 
 # Initialize services with dependency injection support
 def get_cache_service():
-    return CacheService()
+    redis_client = get_redis_client(
+        host=os.getenv("REDIS_HOST", "localhost"),
+        port=int(os.getenv("REDIS_PORT", 6379))
+    )
+    return CacheService(redis_client=redis_client)
 
 def get_rate_limiter():
     return RateLimiter()
@@ -97,17 +104,25 @@ async def list_versions(
     provider: str,
     db: Session = Depends(get_db)
 ):
-    modules = db.query(Module).filter(
-        Module.namespace == namespace,
-        Module.name == name,
-        Module.provider == provider
-    ).all()
-    
-    if not modules:
-        raise HTTPException(status_code=404, detail="Module not found")
-    
-    versions = [ModuleResponse.from_orm(module) for module in modules]
-    return {"modules": versions}
+    """List available versions for a module"""
+    try:
+        logger.debug(f"Querying versions for {namespace}/{name}/{provider}")
+        versions = db.query(ModuleVersion).join(Module).filter(
+            Module.namespace == namespace,
+            Module.name == name,
+            Module.provider == provider
+        ).all()
+        
+        if not versions:
+            logger.debug("No versions found")
+            return {"modules": []}
+        
+        result = {"modules": [{"version": v.version} for v in versions]}
+        logger.debug(f"Returning versions: {result}")
+        return result
+    except Exception as e:
+        logger.error(f"Error listing versions: {str(e)}")
+        raise
 
 @app.get("/v1/modules/{namespace}/{name}/{provider}/{version}/download")
 async def download_module(
@@ -142,56 +157,84 @@ async def upload_module(
     db: Session = Depends(get_db),
     _: dict = Depends(check_permissions([Permission.UPLOAD_MODULE]))
 ):
-    # Validate metadata
-    logger.debug(f"Validating metadata: namespace={namespace}, name={name}, provider={provider}, version={version}")
-    is_valid_metadata, metadata_errors = ModuleValidator.validate_module_metadata(
-        namespace, name, provider, version
-    )
-    if not is_valid_metadata:
-        logger.error(f"Metadata validation failed: {metadata_errors}")
-        raise HTTPException(status_code=400, detail=metadata_errors)
-
-    # Save file temporarily for validation
-    temp_file = tempfile.NamedTemporaryFile(delete=False, suffix='.zip')
     try:
-        content = await file.read()
-        with open(temp_file.name, 'wb') as f:
-            f.write(content)
-        logger.debug(f"Module saved temporarily at {temp_file.name}")
+        logger.debug(f"Starting upload for {namespace}/{name}/{provider}/{version}")
         
-        # Validate module structure
-        logger.debug(f"Validating module structure at {temp_file.name}")
-        is_valid_structure, structure_errors = ModuleValidator.validate_module_structure(temp_file.name)
-        if not is_valid_structure:
-            logger.error(f"Structure validation failed: {structure_errors}")
-            raise HTTPException(status_code=400, detail=list(structure_errors.values()))
-        
-        # Store module
+        # Validate metadata first
+        logger.debug("Validating metadata")
+        is_valid_metadata, metadata_errors = ModuleValidator.validate_module_metadata(
+            namespace, name, provider, version
+        )
+        if not is_valid_metadata:
+            logger.error(f"Metadata validation failed: {metadata_errors}")
+            raise HTTPException(status_code=400, detail=metadata_errors)
+
+        # Save the uploaded file first
+        logger.debug("Saving uploaded file")
         storage = ModuleStorage()
         temp_path = await storage.save_module(namespace, name, provider, version, file)
+        logger.debug(f"File saved to {temp_path}")
+
+        # Now validate the saved file
+        logger.debug("Validating module structure")
+        is_valid_structure, structure_errors = ModuleValidator.validate_module_structure(temp_path)
+        if not is_valid_structure:
+            logger.error(f"Structure validation failed: {structure_errors}")
+            # Clean up the invalid module
+            await storage.delete_module(namespace, name, provider, version)
+            raise HTTPException(status_code=400, detail=structure_errors)
         
-        # Generate documentation
+        # Generate documentation from the saved file
         logger.debug("Generating documentation")
         docs = DocGenerator.generate_module_docs(Path(temp_path).parent)
         
-        # Create GitHub repository
-        github_service = GitHubService(os.getenv("GITHUB_TOKEN"))
-        repo_url = await github_service.create_module_repo(
-            namespace, name, provider, version, Path(temp_path).parent
-        )
+        # Create GitHub repository if configured
+        repo_url = None
+        if os.getenv("GITHUB_TOKEN"):
+            logger.debug("Creating GitHub repository")
+            github_service = GitHubService(os.getenv("GITHUB_TOKEN"))
+            repo_url = await github_service.create_module_repo(
+                namespace, name, provider, version, Path(temp_path).parent
+            )
         
-        # Update database with new module version and documentation
-        module_version = DBModuleVersion(
-            id=f"{namespace}-{name}-{provider}-{version}",
-            module_id=f"{namespace}-{name}-{provider}",
-            version=version,
-            protocols=json.dumps(["5.0"]),
-            source_zip=temp_path,
-            documentation=json.dumps(docs),
-            repository_url=repo_url
-        )
-        db.add(module_version)
-        db.commit()
+        # Create database entries
+        logger.debug("Creating database entries")
+        try:
+            # Create or get the module first
+            module_id = f"{namespace}-{name}-{provider}"
+            module = db.query(Module).filter_by(id=module_id).first()
+            if not module:
+                module = Module(
+                    id=module_id,
+                    namespace=namespace,
+                    name=name,
+                    provider=provider,
+                    source=repo_url
+                )
+                db.add(module)
+                db.flush()  # Flush to get the module.id
+            
+            # Now create the module version
+            module_version = ModuleVersion(
+                id=f"{module_id}-{version}",
+                module_id=module.id,  # Use the module.id from the existing or newly created module
+                version=version,
+                protocols=["5.0"],
+                platforms=[{"os": "linux", "arch": "amd64"}],
+                source_zip=temp_path,
+                documentation=docs,
+                repository_url=repo_url
+            )
+            db.add(module_version)
+            db.commit()
+            logger.debug("Database entries created successfully")
+            
+        except Exception as db_error:
+            logger.error(f"Database error: {str(db_error)}")
+            db.rollback()
+            # Clean up stored module on database failure
+            await storage.delete_module(namespace, name, provider, version)
+            raise HTTPException(status_code=500, detail=f"Failed to save module metadata: {str(db_error)}")
         
         return {
             "status": "success",
@@ -199,9 +242,12 @@ async def upload_module(
             "documentation": docs,
             "repository_url": repo_url
         }
-    finally:
-        if os.path.exists(temp_file.name):
-            os.unlink(temp_file.name)
+        
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Unexpected error in upload_module: {str(e)}", exc_info=True)
+        raise HTTPException(status_code=500, detail=str(e))
 
 @app.get("/v1/modules/{namespace}/{name}/{provider}/{version}/dependencies")
 async def get_module_dependencies(
@@ -246,6 +292,70 @@ async def generate_module(
     """
     # TODO: Implement module generation logic using Claude
     pass
+
+@app.get("/v1/modules/{namespace}/{name}/{provider}")
+async def get_latest_module(
+    namespace: str,
+    name: str,
+    provider: str,
+    db: Session = Depends(get_db)
+):
+    """Get the latest version of a module"""
+    latest_version = db.query(ModuleVersion).join(Module).filter(
+        Module.namespace == namespace,
+        Module.name == name,
+        Module.provider == provider
+    ).order_by(ModuleVersion.version.desc()).first()
+    
+    if not latest_version:
+        raise HTTPException(status_code=404, detail="Module not found")
+    
+    return {
+        "id": latest_version.id,
+        "owner": namespace,
+        "namespace": namespace,
+        "name": name,
+        "version": latest_version.version,
+        "provider": provider,
+        "description": latest_version.description,
+        "source": latest_version.repository_url,
+        "published_at": latest_version.created_at.isoformat(),
+        "downloads": 0,  # TODO: Implement download counting
+        "verified": False
+    }
+
+@app.get("/v1/modules/{namespace}/{name}/{provider}/{version}")
+async def get_module_version(
+    namespace: str,
+    name: str,
+    provider: str,
+    version: str,
+    db: Session = Depends(get_db)
+):
+    """Get a specific version of a module"""
+    module_version = db.query(ModuleVersion).join(Module).filter(
+        Module.namespace == namespace,
+        Module.name == name,
+        Module.provider == provider,
+        ModuleVersion.version == version
+    ).first()
+    
+    if not module_version:
+        raise HTTPException(status_code=404, detail="Module version not found")
+    
+    return {
+        "id": module_version.id,
+        "owner": namespace,
+        "namespace": namespace,
+        "name": name,
+        "version": version,
+        "provider": provider,
+        "description": module_version.description,
+        "source": module_version.repository_url,
+        "published_at": module_version.created_at.isoformat(),
+        "downloads": 0,  # TODO: Implement download counting
+        "verified": False
+    }
 
 if __name__ == "__main__":
     import uvicorn

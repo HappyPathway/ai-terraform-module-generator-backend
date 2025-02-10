@@ -4,6 +4,7 @@ import os
 import zipfile
 import tempfile
 import logging
+import time
 
 logging.basicConfig(level=logging.DEBUG)
 logger = logging.getLogger(__name__)
@@ -24,6 +25,17 @@ def create_module_zip(module_path: str, output_path: str):
 def upload_module(client, module_info: dict, zip_path: str) -> bool:
     """Upload a module and verify it was uploaded successfully"""
     try:
+        logger.debug("Starting module upload...")
+        start_time = time.time()
+        
+        logger.debug(f"Preparing to upload module with info: {module_info}")
+        logger.debug(f"ZIP file path: {zip_path}")
+        
+        # Log file size
+        file_size = os.path.getsize(zip_path)
+        logger.debug(f"ZIP file size: {file_size} bytes")
+        
+        logger.debug("Initiating upload request...")
         result = client.upload_module(
             namespace=module_info['namespace'],
             name=module_info['name'],
@@ -31,23 +43,31 @@ def upload_module(client, module_info: dict, zip_path: str) -> bool:
             version=module_info['version'],
             file_path=zip_path
         )
-        logger.info(f"Upload successful: {result}")
+        
+        upload_time = time.time() - start_time
+        logger.debug(f"Upload request completed in {upload_time:.2f} seconds")
+        logger.info(f"Upload response: {result}")
 
+        logger.debug("Starting verification process...")
         # Verify module is searchable
+        logger.debug(f"Searching for module: {module_info['name']}")
         search_result = client.search_modules(module_info['name'])
         logger.info(f"Search result after upload: {search_result}")
 
         # List versions
+        logger.debug(f"Listing versions for {module_info['namespace']}/{module_info['name']}/{module_info['provider']}")
         versions = client.list_versions(
             module_info['namespace'], 
             module_info['name'], 
             module_info['provider']
         )
         logger.info(f"Available versions: {versions}")
+        
+        logger.debug("Module upload and verification completed successfully")
         return True
 
     except Exception as e:
-        logger.error(f"Upload failed: {e}")
+        logger.error(f"Upload failed: {str(e)}", exc_info=True)
         return False
 
 def main():

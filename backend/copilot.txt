@@ -1,0 +1,4 @@
+[2024-02-17] Fixed database error 'ModuleVersion' object has no attribute 'module_id'
+- Updated ModuleVersion model in app/models/module.py to properly define module_id and relationships
+- Restarted containers to apply changes
+- Verified error resolution through logs

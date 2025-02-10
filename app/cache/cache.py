@@ -3,13 +3,16 @@ import json
 from typing import Optional, Any
 import os
 
+def get_redis_client(host=None, port=None):
+    return Redis(
+        host=host or os.getenv("REDIS_HOST", "localhost"),
+        port=int(port or os.getenv("REDIS_PORT", 6379)),
+        decode_responses=True
+    )
+
 class CacheService:
     def __init__(self, redis_client=None):
-        self.redis = redis_client or Redis(
-            host=os.getenv("REDIS_HOST", "localhost"),
-            port=int(os.getenv("REDIS_PORT", 6379)),
-            decode_responses=True
-        )
+        self.redis = redis_client or get_redis_client()
         self.ttl = 3600  # 1 hour cache
 
     async def get(self, key: str) -> Optional[Any]:

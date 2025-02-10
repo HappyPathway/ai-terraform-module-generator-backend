@@ -15,6 +15,9 @@ RUN git clone --depth=1 https://github.com/tfutils/tfenv.git ~/.tfenv \
 RUN tfenv install latest \
     && tfenv use latest
 
+# Create module storage directory with proper permissions
+RUN mkdir -p /app/module_storage && chmod 777 /app/module_storage
+
 WORKDIR /app
 
 COPY requirements.txt .

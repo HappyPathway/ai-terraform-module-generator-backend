@@ -1,2 +1,16 @@
 2024-02-17: "please start docker compose and run the helper python scripts, fix any errors"
 2024-02-17: "please help me create some test modules"
+User: please add a project proposal to the ./backend directory. Explain our current status and what our roadmap looks like.
+Assistant: Created PROJECT_PROPOSAL.md with comprehensive project status, 8-month roadmap, and detailed planning sections including technical debt, success metrics, and risk assessment.
+Continue to iterate?
+
+[2024-01-09] "with the help of CoPilot and other AI, can we make the timeline a bit more aggressive?"
+[2024-01-09] "thanks for your great work and helping me build something fantastic!"
+[2024-01-09] "Nope, lets go ahead and take care of this error... ImportError: cannot import name 'check_permissions' from 'app.auth'"
+[2024-01-09] "We need to add PYTHONPATH"
+[2024-01-09] "Continue: 'Continue to iterate?'"
+
+[2024-01-25] run docker compose logs --tail 50 backend and fix errors
+
+this is supposed to be running in a container, we should be using docker compose
+we should be using the -d flag when calling docker compose

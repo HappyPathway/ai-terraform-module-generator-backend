@@ -2,6 +2,7 @@ import requests
 from typing import Optional, Dict, Any, List
 import os
 import logging
+import time
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
@@ -22,9 +23,26 @@ class TerraformModuleClient:
         """Make HTTP request with error handling"""
         try:
             url = f"{self.base_url}/{endpoint.lstrip('/')}"
+            logger.debug(f"Making {method} request to {url}")
+            logger.debug(f"Request headers: {self.headers}")
+            logger.debug(f"Request kwargs: {kwargs}")
+            
+            start_time = time.time()
             response = requests.request(method, url, headers=self.headers, **kwargs)
-            response.raise_for_status()
-            return response.json()
+            request_time = time.time() - start_time
+            
+            logger.debug(f"Response received in {request_time:.2f} seconds")
+            logger.debug(f"Response status: {response.status_code}")
+            logger.debug(f"Response headers: {dict(response.headers)}")
+            
+            try:
+                response.raise_for_status()
+                return response.json()
+            except requests.exceptions.JSONDecodeError:
+                logger.error("Failed to decode JSON response")
+                logger.debug(f"Raw response content: {response.text}")
+                raise
+                
         except requests.exceptions.RequestException as e:
             logger.error(f"Request failed: {e}")
             raise TerraformModuleClientError(f"API request failed: {e}")
@@ -50,13 +68,31 @@ class TerraformModuleClient:
     def upload_module(self, namespace: str, name: str, provider: str, 
                      version: str, file_path: str) -> Dict[str, Any]:
         """Upload a new module version."""
-        with open(file_path, 'rb') as f:
-            files = {'file': ('module.zip', f)}
-            return self._make_request(
-                "POST",
-                f"api/modules/{namespace}/{name}/{provider}/{version}/upload",
-                files=files
-            )
+        logger.debug(f"Starting module upload for {namespace}/{name}/{provider}/{version}")
+        logger.debug(f"Reading file from {file_path}")
+        
+        try:
+            file_size = os.path.getsize(file_path)
+            logger.debug(f"File size: {file_size} bytes")
+            
+            logger.debug("Opening file and preparing request...")
+            with open(file_path, 'rb') as f:
+                files = {'file': ('module.zip', f)}
+                logger.debug("Sending POST request...")
+                start_time = time.time()
+                response = self._make_request(
+                    "POST",
+                    f"api/modules/{namespace}/{name}/{provider}/{version}/upload",
+                    files=files
+                )
+                upload_time = time.time() - start_time
+                logger.debug(f"Upload request completed in {upload_time:.2f} seconds")
+                logger.debug(f"Upload response: {response}")
+                return response
+                
+        except Exception as e:
+            logger.error(f"Upload failed: {str(e)}", exc_info=True)
+            raise TerraformModuleClientError(f"Module upload failed: {str(e)}")
 
     def get_module_stats(self, namespace: str, name: str, provider: str) -> Dict[str, Any]:
         """Get statistics for a module."""
