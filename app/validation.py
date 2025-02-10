@@ -1,26 +1,86 @@
 import zipfile
 import json
 import os
+import tempfile
+import subprocess
+import shutil
 from typing import Tuple, List, Dict, Any, Optional
 import hcl2
 import re
 import semver
+import logging
+
+logger = logging.getLogger(__name__)
 
 class ModuleValidator:
     @staticmethod
-    def validate_module_structure(module_path: str) -> Tuple[bool, Dict[str, Any]]:
+    def validate_terraform_module(module_path: str) -> Tuple[bool, Dict[str, str]]:
+        """Run terraform init and validate on a module"""
         errors = {}
-        required_files = ["main.tf", "variables.tf", "outputs.tf"]
-        
-        if not os.path.exists(module_path):
-            errors["path"] = f"Module path {module_path} does not exist"
-            return False, errors
+        try:
+            # Run terraform init first
+            result = subprocess.run(['terraform', 'init'], 
+                                 cwd=module_path, 
+                                 check=True, 
+                                 capture_output=True,
+                                 text=True)
+            logger.debug(f"Terraform init output: {result.stdout}")
             
-        for file in required_files:
-            if not os.path.exists(os.path.join(module_path, file)):
-                errors["files"] = f"Required file {file} is missing"
+            # Run terraform validate
+            result = subprocess.run(['terraform', 'validate'], 
+                                 cwd=module_path, 
+                                 check=True, 
+                                 capture_output=True,
+                                 text=True)
+            logger.debug(f"Terraform validate output: {result.stdout}")
+            return True, {}
+            
+        except subprocess.CalledProcessError as e:
+            error_msg = e.stderr or e.stdout
+            errors["terraform_validation"] = f"Terraform validation failed: {error_msg}"
+            return False, errors
+
+    @staticmethod
+    def validate_module_structure(zip_path: str) -> Tuple[bool, Dict[str, Any]]:
+        errors = {}
+        
+        if not os.path.exists(zip_path):
+            errors["path"] = f"Module path {zip_path} does not exist"
+            return False, errors
+
+        try:
+            with tempfile.TemporaryDirectory(prefix="terraform_module_") as tmpdir:
+                logger.debug(f"Created temporary directory for validation: {tmpdir}")
+
+                # Extract the zip file
+                with zipfile.ZipFile(zip_path, 'r') as zip_ref:
+                    zip_ref.extractall(tmpdir)
+                    logger.debug(f"Extracted module to temporary directory: {tmpdir}")
+                    file_list = zip_ref.namelist()
+                    logger.debug(f"Files in zip: {file_list}")
+                    
+                # Check for at least one .tf file
+                tf_files = [f for f in os.listdir(tmpdir) if f.endswith('.tf')]
+                if not tf_files:
+                    errors["terraform_files"] = "Module must contain at least one .tf file"
+                    return False, errors
+
+                # Run terraform validation
+                is_valid, tf_errors = ModuleValidator.validate_terraform_module(tmpdir)
+                if not is_valid:
+                    errors.update(tf_errors)
+                    return False, errors
+
+                logger.debug(f"Validation complete, temporary directory will be cleaned up: {tmpdir}")
+
+        except zipfile.BadZipFile:
+            errors["zip"] = "Invalid zip file format"
+            return False, errors
+        except Exception as e:
+            errors["validation"] = f"Error validating module: {str(e)}"
+            return False, errors
                 
-        return len(errors) == 0, errors
+        return True, {}
 
     @staticmethod
     def validate_module_metadata(namespace: str, name: str, provider: str, version: str) -> Tuple[bool, Dict[str, Any]]:

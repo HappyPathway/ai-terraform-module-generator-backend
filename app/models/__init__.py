@@ -1,4 +1,7 @@
-from .terraform import DBModule as Module, DBModuleVersion as ModuleVersion, ModuleResponse
-from .base import Base
+from .models import Module, DBModuleVersion
 
-__all__ = ['Module', 'ModuleVersion', 'ModuleResponse', 'Base']
+class ModuleResponse(Module):
+    class Config:
+        orm_mode = True
+
+__all__ = ['Module', 'ModuleResponse', 'DBModuleVersion']

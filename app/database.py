@@ -1,19 +1,20 @@
 from sqlalchemy import create_engine
-from sqlalchemy.orm import sessionmaker, Session
-from .models import Base
+from sqlalchemy.orm import sessionmaker
+from .models.base import Base
+import os
 
-SQLALCHEMY_DATABASE_URL = "sqlite:///./test.db"
-engine = create_engine(SQLALCHEMY_DATABASE_URL)
+SQLALCHEMY_DATABASE_URL = os.getenv("DATABASE_URL", "sqlite:///./modules.db")
+
+engine = create_engine(
+    SQLALCHEMY_DATABASE_URL,
+    connect_args={"check_same_thread": False}  # needed only for SQLite
+)
+
 SessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=engine)
 
-def init_db():
-    Base.metadata.create_all(bind=engine)
-
-def get_db() -> Session:
+def get_db():
     db = SessionLocal()
     try:
         yield db
     finally:
         db.close()
-
-init_db()  # Initialize tables when database module is imported

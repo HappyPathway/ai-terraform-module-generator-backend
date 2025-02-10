@@ -1,30 +1,33 @@
-import os
-import shutil
+"""Module storage functionality"""
+from pathlib import Path
 from fastapi import UploadFile
-from typing import Optional
+import shutil
 
-STORAGE_DIR = os.getenv("MODULE_STORAGE_DIR", "./module_storage")
+async def store_module_file(file: UploadFile, destination: Path) -> None:
+    """Store an uploaded module file at the specified destination"""
+    destination.parent.mkdir(parents=True, exist_ok=True)
+    with destination.open("wb") as f:
+        shutil.copyfileobj(file.file, f)
 
-async def store_module_file(file: UploadFile, namespace: str, name: str, provider: str, version: str) -> str:
-    """Store a module file in the local filesystem"""
-    # Create the directory structure if it doesn't exist
-    module_dir = os.path.join(STORAGE_DIR, namespace, name, provider, version)
-    os.makedirs(module_dir, exist_ok=True)
-    
-    file_path = os.path.join(module_dir, file.filename)
-    try:
-        with open(file_path, "wb") as buffer:
-            shutil.copyfileobj(file.file, buffer)
-        return file_path
-    finally:
-        file.file.close()
+class ModuleStorage:
+    STORAGE_DIR = "module_storage"
 
-async def get_module_file(namespace: str, name: str, provider: str, version: str) -> Optional[str]:
-    """Get the path to a stored module file"""
-    module_dir = os.path.join(STORAGE_DIR, namespace, name, provider, version)
-    if not os.path.exists(module_dir):
-        return None
-        
-    # Return the first file found in the directory
-    files = os.listdir(module_dir)
-    return os.path.join(module_dir, files[0]) if files else None
+    @classmethod
+    async def save_module(cls, namespace: str, name: str, provider: str, version: str, file: UploadFile) -> str:
+        """Save an uploaded module file"""
+        storage_path = cls._get_storage_path(namespace, name, provider, version)
+        await store_module_file(file, storage_path)
+        return str(storage_path)
+
+    @classmethod
+    def get_module_path(cls, namespace: str, name: str, provider: str, version: str) -> Path:
+        """Get the path to a stored module"""
+        return cls._get_storage_path(namespace, name, provider, version)
+
+    @classmethod
+    def _get_storage_path(cls, namespace: str, name: str, provider: str, version: str) -> Path:
+        """Generate the storage path for a module"""
+        base_path = Path(cls.STORAGE_DIR)
+        return base_path / namespace / name / provider / version / "module.zip"
+
+__all__ = ['ModuleStorage', 'store_module_file']

@@ -1,0 +1,2 @@
+2024-02-17: "please start docker compose and run the helper python scripts, fix any errors"
+2024-02-17: "please help me create some test modules"

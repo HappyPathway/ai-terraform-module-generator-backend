@@ -3,12 +3,14 @@ from fastapi.responses import JSONResponse
 from sqlalchemy.orm import Session
 from typing import Optional, List, Dict
 from pydantic import BaseModel
+import json, os, logging, tempfile
+from pathlib import Path
 from .database import get_db, engine, Base
-from .models import Module, ModuleResponse
-from .storage import store_module_file
+from .models import Module, ModuleResponse, DBModuleVersion
+from .storage import ModuleStorage
 from .validation import ModuleValidator
-from .github import get_terraform_discovery
-from .docs import update_documentation
+from .github import GitHubService
+from .docs import DocGenerator
 from .auth.auth import verify_token
 from .auth.dependencies import check_permissions, Permission
 from .cache import CacheService
@@ -16,6 +18,10 @@ from .search import SearchService
 from .middleware import RateLimiter
 from .stats import StatsTracker
 from .dependencies import DependencyManager
+
+# Configure logging
+logging.basicConfig(level=logging.DEBUG)
+logger = logging.getLogger(__name__)
 
 app = FastAPI(
     title="AI Terraform Module Generator",
@@ -137,49 +143,65 @@ async def upload_module(
     _: dict = Depends(check_permissions([Permission.UPLOAD_MODULE]))
 ):
     # Validate metadata
+    logger.debug(f"Validating metadata: namespace={namespace}, name={name}, provider={provider}, version={version}")
     is_valid_metadata, metadata_errors = ModuleValidator.validate_module_metadata(
         namespace, name, provider, version
     )
     if not is_valid_metadata:
+        logger.error(f"Metadata validation failed: {metadata_errors}")
         raise HTTPException(status_code=400, detail=metadata_errors)
 
     # Save file temporarily for validation
-    temp_path = await ModuleStorage.save_module(namespace, name, provider, version, file)
-    
-    # Validate module structure
-    is_valid_structure, structure_errors = ModuleValidator.validate_module_structure(temp_path)
-    if not is_valid_structure:
-        os.remove(temp_path)
-        raise HTTPException(status_code=400, detail=structure_errors)
-    
-    # Generate documentation
-    docs = DocGenerator.generate_module_docs(Path(temp_path).parent)
-    
-    # Create GitHub repository
-    github_service = GitHubService(os.getenv("GITHUB_TOKEN"))
-    repo_url = await github_service.create_module_repo(
-        namespace, name, provider, version, Path(temp_path).parent
-    )
-    
-    # Update database with new module version and documentation
-    module_version = DBModuleVersion(
-        id=f"{namespace}-{name}-{provider}-{version}",
-        module_id=f"{namespace}-{name}-{provider}",
-        version=version,
-        protocols=json.dumps(["5.0"]),
-        source_zip=temp_path,
-        documentation=json.dumps(docs),
-        repository_url=repo_url
-    )
-    db.add(module_version)
-    db.commit()
-    
-    return {
-        "status": "success",
-        "file_path": temp_path,
-        "documentation": docs,
-        "repository_url": repo_url
-    }
+    temp_file = tempfile.NamedTemporaryFile(delete=False, suffix='.zip')
+    try:
+        content = await file.read()
+        with open(temp_file.name, 'wb') as f:
+            f.write(content)
+        logger.debug(f"Module saved temporarily at {temp_file.name}")
+        
+        # Validate module structure
+        logger.debug(f"Validating module structure at {temp_file.name}")
+        is_valid_structure, structure_errors = ModuleValidator.validate_module_structure(temp_file.name)
+        if not is_valid_structure:
+            logger.error(f"Structure validation failed: {structure_errors}")
+            raise HTTPException(status_code=400, detail=list(structure_errors.values()))
+        
+        # Store module
+        storage = ModuleStorage()
+        temp_path = await storage.save_module(namespace, name, provider, version, file)
+        
+        # Generate documentation
+        logger.debug("Generating documentation")
+        docs = DocGenerator.generate_module_docs(Path(temp_path).parent)
+        
+        # Create GitHub repository
+        github_service = GitHubService(os.getenv("GITHUB_TOKEN"))
+        repo_url = await github_service.create_module_repo(
+            namespace, name, provider, version, Path(temp_path).parent
+        )
+        
+        # Update database with new module version and documentation
+        module_version = DBModuleVersion(
+            id=f"{namespace}-{name}-{provider}-{version}",
+            module_id=f"{namespace}-{name}-{provider}",
+            version=version,
+            protocols=json.dumps(["5.0"]),
+            source_zip=temp_path,
+            documentation=json.dumps(docs),
+            repository_url=repo_url
+        )
+        db.add(module_version)
+        db.commit()
+        
+        return {
+            "status": "success",
+            "file_path": temp_path,
+            "documentation": docs,
+            "repository_url": repo_url
+        }
+    finally:
+        if os.path.exists(temp_file.name):
+            os.unlink(temp_file.name)
 
 @app.get("/v1/modules/{namespace}/{name}/{provider}/{version}/dependencies")
 async def get_module_dependencies(
