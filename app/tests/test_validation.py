@@ -20,4 +20,4 @@ def test_validate_invalid_version():
         version="invalid"
     )
     assert not is_valid
-    assert any("Version must be" in error for error in errors)
+    assert any("Version must be" in msg for msg in errors.values())

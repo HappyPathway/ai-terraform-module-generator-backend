@@ -10,6 +10,7 @@ from unittest.mock import Mock, patch
 import os
 import tempfile
 import asyncio
+import zipfile
 
 # Use SQLite in-memory database for testing
 SQLALCHEMY_TEST_DATABASE_URL = "sqlite:///./test.db"
@@ -66,7 +67,13 @@ def client(test_db, mock_cache_service):
 @pytest.fixture
 def test_module_zip():
     with tempfile.NamedTemporaryFile(suffix='.zip', delete=False) as tmp:
-        tmp.write(b"test content")
+        with zipfile.ZipFile(tmp.name, 'w') as zipf:
+            # Create a simple terraform file inside the zip
+            zipf.writestr('main.tf', '''
+resource "aws_s3_bucket" "test" {
+  bucket = "test-bucket"
+}
+''')
         return tmp.name
 
 @pytest.fixture
