@@ -1,25 +1,134 @@
-# ai-terraform-module-generator-backend
-FastAPI backend for the AI Terraform Module Generator
+# AI Terraform Module Generator - Backend Service API Documentation
 
-## Terraform Registry API Implementation
+## Overview
+The AI Terraform Module Generator backend service implements the Terraform Registry Protocol and provides additional endpoints for module management and search. This document outlines the available API endpoints and their contracts.
 
-This backend implements the necessary Terraform Registry Protocol endpoints to serve as a private registry. The following endpoints are supported:
+## Terraform Registry API Endpoints
 
-- `/.well-known/terraform.json` - Registry discovery protocol
-- `/v1/modules/{namespace}/{name}/{provider}/versions` - List available versions
-- `/v1/modules/{namespace}/{name}/{provider}/{version}/download` - Download source code
+### 1. Registry Discovery
+- **Endpoint:** `/.well-known/terraform.json`
+- **Method:** GET
+- **Description:** Provides the base URL for the Terraform Registry API.
+- **Response:**
+  ```json
+  {
+    "modules.v1": "/v1/modules/"
+  }
+  ```
 
-For more information about the Terraform Registry Protocol, see the [official documentation](https://www.terraform.io/docs/internals/provider-registry-protocol.html).
+### 2. List Module Versions
+- **Endpoint:** `/v1/modules/{namespace}/{name}/{provider}/versions`
+- **Method:** GET
+- **Description:** Lists available versions for a module.
+- **Response:**
+  ```json
+  {
+    "modules": [
+      {
+        "versions": [
+          {
+            "version": "1.0.0",
+            "protocols": ["5.0"],
+            "platforms": [
+              {
+                "os": "linux",
+                "arch": "amd64"
+              }
+            ]
+          }
+        ]
+      }
+    ]
+  }
+  ```
+
+### 3. Get Module Download URL
+- **Endpoint:** `/v1/modules/{namespace}/{name}/{provider}/{version}/download`
+- **Method:** GET
+- **Description:** Retrieves the download URL for a specific module version.
+- **Response:**
+  ```json
+  {
+    "source": "https://example.com/module.zip"
+  }
+  ```
+
+### 4. Download Module Source
+- **Endpoint:** `/v1/modules/{namespace}/{name}/{provider}/{version}/source`
+- **Method:** GET
+- **Description:** Downloads the source code for a specific module version.
+- **Response:** Binary data (ZIP file)
 
 ## Additional API Endpoints
 
-### Module Search and Statistics
-- `/v1/modules/search` - Search for modules with filtering
-- `/v1/modules/{namespace}/{name}/{provider}/stats` - Get module statistics
-- `/v1/modules/{namespace}/{name}/{provider}/{version}/dependencies` - List module dependencies
+### 1. Search Modules
+- **Endpoint:** `/v1/modules/search`
+- **Method:** GET
+- **Description:** Searches for modules with optional filtering.
+- **Query Parameters:**
+  - `q` (string): Search query
+  - `provider` (string, optional): Filter by provider
+  - `namespace` (string, optional): Filter by namespace
+  - `limit` (int, optional): Number of results to return (default: 10)
+  - `offset` (int, optional): Offset for pagination (default: 0)
+- **Response:**
+  ```json
+  {
+    "modules": [
+      {
+        "id": "module-id",
+        "owner": "module-owner",
+        "namespace": "module-namespace",
+        "name": "module-name",
+        "version": "latest-version",
+        "provider": "module-provider",
+        "description": "module-description",
+        "source": "module-source-url",
+        "published_at": "publish-date",
+        "downloads": 123,
+        "verified": true
+      }
+    ]
+  }
+  ```
 
-### Rate Limiting
+### 2. List Module Dependencies
+- **Endpoint:** `/v1/modules/{namespace}/{name}/{provider}/{version}/dependencies`
+- **Method:** GET
+- **Description:** Lists dependencies for a specific module version.
+- **Response:**
+  ```json
+  {
+    "dependencies": [
+      {
+        "source": "dependency-source",
+        "version": "dependency-version"
+      }
+    ]
+  }
+  ```
+
+### 3. Get Module Statistics
+- **Endpoint:** `/v1/modules/{namespace}/{name}/{provider}/stats`
+- **Method:** GET
+- **Description:** Retrieves statistics for a module.
+- **Response:**
+  ```json
+  {
+    "downloads": 1234,
+    "stars": 56,
+    "forks": 7
+  }
+  ```
+
+## Rate Limiting
 The API implements rate limiting of 100 requests per minute per IP address.
+
+## Authentication
+The API uses JWT-based authentication for protected endpoints. Include the JWT token in the `Authorization` header as follows:
+```
+Authorization: Bearer <token>
+```
 
 ## Development Setup
 
