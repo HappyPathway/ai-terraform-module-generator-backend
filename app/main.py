@@ -1,6 +1,6 @@
-from fastapi import FastAPI, File, HTTPException, Depends, Request, UploadFile
+from fastapi import FastAPI, File, HTTPException, Depends, Request, UploadFile, Response
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import JSONResponse
+from fastapi.responses import JSONResponse, FileResponse
 from .database import get_db, engine
 from .models.base import Base
 from .models.module import Module, ModuleVersion  # Update import path to use module.py
@@ -21,6 +21,7 @@ from .search import SearchService
 from .dependencies import DependencyManager
 import logging
 import os
+import semver
 
 # Configure logging
 logging.basicConfig(level=logging.DEBUG)
@@ -43,11 +44,19 @@ class ModuleVersionSchema(BaseModel):
 class ModuleVersions(BaseModel):
     modules: List[ModuleVersionSchema]
 
+# Change base path to match protocol exactly
+API_BASE = "/v1/modules"
+
 @app.get("/.well-known/terraform.json")
-async def terraform_discovery():
+async def terraform_discovery(request: Request):
+    """Registry discovery protocol endpoint"""
+    # Build URL relative to the current host, ensuring trailing slash
+    host = request.headers.get("X-Forwarded-Host") or request.headers.get("Host", "registry.local")
+    scheme = request.headers.get("X-Forwarded-Proto") or request.url.scheme
+    base_url = f"{scheme}://{host}/v1/modules/"
+    
     return JSONResponse({
-        "modules.v1": "/v1/modules/",
-        "providers.v1": "/v1/providers/"
+        "modules.v1": "/v1/modules/"  # Return relative URL with trailing slash as per protocol
     })
 
 # Initialize services with dependency injection support
@@ -75,7 +84,7 @@ async def rate_limit_middleware(request: Request, call_next):
         raise HTTPException(status_code=429, detail="Rate limit exceeded")
     return await call_next(request)
 
-@app.get("/v1/modules/search")
+@app.get(f"{API_BASE}/search")
 async def search_modules(
     query: str = "",
     provider: str = None,
@@ -87,7 +96,7 @@ async def search_modules(
 ):
     cache_key = f"search:{query}:{provider}:{namespace}:{limit}:{offset}"
     cached_result = await cache_service.get(cache_key)
-    if cached_result:
+    if (cached_result):
         return cached_result
         
     results = await SearchService.search_modules(
@@ -98,7 +107,7 @@ async def search_modules(
     for module in results:
         # Get the latest version for each module
         latest_version = max(module.versions, key=lambda v: v.version) if module.versions else None
-        if latest_version:
+        if (latest_version):
             modules.append({
                 "id": module.id,
                 "owner": module.owner or module.namespace,
@@ -117,55 +126,133 @@ async def search_modules(
     await cache_service.set(cache_key, response)
     return response
 
-@app.get("/v1/modules/{namespace}/{name}/{provider}/versions")
+@app.get(f"{API_BASE}/{{namespace}}/{{name}}/{{system}}/versions")
 async def list_versions(
     namespace: str,
     name: str,
-    provider: str,
+    system: str,
     db: Session = Depends(get_db)
 ):
     """List available versions for a module"""
     try:
-        logger.debug(f"Querying versions for {namespace}/{name}/{provider}")
+        logger.debug(f"Querying versions for {namespace}/{name}/{system}")
         versions = db.query(ModuleVersion).join(Module).filter(
             Module.namespace == namespace,
             Module.name == name,
-            Module.provider == provider
+            Module.provider == system
         ).all()
         
-        if not versions:
-            logger.debug("No versions found")
-            return {"modules": []}
+        logger.debug(f"Found versions: {[v.version for v in versions]}")
         
-        result = {"modules": [{"version": v.version} for v in versions]}
-        logger.debug(f"Returning versions: {result}")
-        return result
+        # Validate and sort versions according to semver
+        valid_versions = []
+        for v in versions:
+            try:
+                semver.Version.parse(v.version)
+                valid_versions.append(v)
+            except ValueError:
+                logger.warning(f"Invalid semver version found: {v.version}")
+                continue
+        
+        logger.debug(f"Valid versions: {[v.version for v in valid_versions]}")
+        
+        # Sort by semver, not string comparison
+        sorted_versions = sorted(valid_versions, 
+                               key=lambda x: semver.Version.parse(x.version), 
+                               reverse=True)
+        
+        logger.debug(f"Sorted versions: {[v.version for v in sorted_versions]}")
+        
+        # Format exactly as specified in protocol
+        result = {
+            "modules": [{
+                "versions": [{"version": v.version} for v in sorted_versions]
+            }]
+        }
+        logger.debug(f"Returning response: {result}")
+        return JSONResponse(content=result, media_type="application/json")
+        
     except Exception as e:
         logger.error(f"Error listing versions: {str(e)}")
-        raise
-
-@app.get("/v1/modules/{namespace}/{name}/{provider}/{version}/download")
-async def download_module(
-    namespace: str, 
-    name: str, 
-    provider: str, 
-    version: str, 
-    db: Session = Depends(get_db),
-    stats_tracker: StatsTracker = Depends(get_stats_tracker),
-    token: dict = Depends(verify_token)
-):
-    module = db.query(Module).filter(
-        Module.namespace == namespace,
-        Module.name == name,
-        Module.provider == provider,
-        Module.version == version
-    ).first()
-    
-    if not module:
         raise HTTPException(status_code=404, detail="Module not found")
-    
-    await stats_tracker.track_download(str(module.id))
-    return {"download_url": module.download_url}
+
+@app.get(f"{API_BASE}/{{namespace}}/{{name}}/{{system}}/{{version}}/download")
+async def get_download_url(
+    namespace: str,
+    name: str,
+    system: str,
+    version: str,
+    db: Session = Depends(get_db)
+):
+    """Get download URL for a specific module version"""
+    try:
+        module_version = db.query(ModuleVersion).join(Module).filter(
+            Module.namespace == namespace,
+            Module.name == name,
+            Module.provider == system,
+            ModuleVersion.version == version
+        ).first()
+        
+        if not module_version:
+            raise HTTPException(status_code=404, detail="Module version not found")
+            
+        # Point to the archive download endpoint
+        response = Response(status_code=204)
+        response.headers["X-Terraform-Get"] = f"./source"
+        return response
+        
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Error getting download URL: {str(e)}")
+        raise HTTPException(status_code=404, detail="Module version not found")
+
+@app.get(f"{API_BASE}/{{namespace}}/{{name}}/{{system}}/{{version}}/source")
+async def download_module_source(
+    namespace: str,
+    name: str,
+    system: str,
+    version: str,
+    db: Session = Depends(get_db)
+):
+    """Download the module source code following HashiCorp protocol"""
+    try:
+        logger.debug(f"Handling source download for {namespace}/{name}/{system}/{version}")
+        module_version = db.query(ModuleVersion).join(Module).filter(
+            Module.namespace == namespace,
+            Module.name == name,
+            Module.provider == system,
+            ModuleVersion.version == version
+        ).first()
+        
+        if not module_version:
+            logger.error("Module version not found")
+            raise HTTPException(status_code=404, detail="Module version not found")
+
+        # Return GitHub URL if available
+        if module_version.repository_url:
+            logger.debug(f"Returning repository URL: {module_version.repository_url}")
+            # Convert GitHub URL to tarball format
+            # From: https://github.com/owner/repo
+            # To: https://api.github.com/repos/owner/repo/tarball/version//*?archive=tar.gz
+            repo_url = module_version.repository_url.replace("https://github.com/", "https://api.github.com/repos/")
+            tarball_url = f"{repo_url}/tarball/{version}//*?archive=tar.gz"
+            response = Response(
+                status_code=204,
+                headers={
+                    "X-Terraform-Get": tarball_url
+                }
+            )
+            return response
+            
+        logger.error("No GitHub repository URL found for module")
+        raise HTTPException(status_code=404, detail="Module source not found in GitHub")
+        
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Error getting module source: {str(e)}")
+        raise HTTPException(status_code=500, detail=str(e))
 
 @app.post("/api/modules/{namespace}/{name}/{provider}/{version}/upload")
 async def upload_module(
@@ -180,6 +267,20 @@ async def upload_module(
     try:
         logger.debug(f"Starting upload for {namespace}/{name}/{provider}/{version}")
         
+        # Check if version already exists
+        existing_version = db.query(ModuleVersion).join(Module).filter(
+            Module.namespace == namespace,
+            Module.name == name,
+            Module.provider == provider,
+            ModuleVersion.version == version
+        ).first()
+        
+        if existing_version:
+            raise HTTPException(
+                status_code=409,
+                detail=f"Version {version} already exists for module {namespace}/{name}/{provider}. Please use a different version number."
+            )
+
         # Validate metadata first
         logger.debug("Validating metadata")
         is_valid_metadata, metadata_errors = ModuleValidator.validate_module_metadata(
@@ -270,30 +371,30 @@ async def upload_module(
         logger.error(f"Unexpected error in upload_module: {str(e)}", exc_info=True)
         raise HTTPException(status_code=500, detail=str(e))
 
-@app.get("/v1/modules/{namespace}/{name}/{provider}/{version}/dependencies")
+@app.get(f"{API_BASE}/{{namespace}}/{{name}}/{{system}}/{{version}}/dependencies")
 async def get_module_dependencies(
     namespace: str,
     name: str,
-    provider: str,
+    system: str,
     version: str,
     db: Session = Depends(get_db)
 ):
-    module_path = ModuleStorage.get_module_path(namespace, name, provider, version)
+    module_path = ModuleStorage.get_module_path(namespace, name, system, version)
     if not module_path:
         raise HTTPException(status_code=404, detail="Module not found")
         
     dependencies = DependencyManager.parse_dependencies(module_path.parent)
     return {"dependencies": dependencies}
 
-@app.get("/v1/modules/{namespace}/{name}/{provider}/stats")
+@app.get(f"{API_BASE}/{{namespace}}/{{name}}/{{system}}/stats")
 async def get_module_stats(
     namespace: str,
     name: str,
-    provider: str,
+    system: str,
     db: Session = Depends(get_db),
     stats_tracker: StatsTracker = Depends(get_stats_tracker)
 ):
-    module_id = f"{namespace}-{name}-{provider}"
+    module_id = f"{namespace}-{name}-{system}"
     return await stats_tracker.get_module_stats(db, module_id)
 
 class GenerateModuleRequest(BaseModel):
@@ -314,18 +415,18 @@ async def generate_module(
     # TODO: Implement module generation logic using Claude
     pass
 
-@app.get("/v1/modules/{namespace}/{name}/{provider}")
+@app.get(f"{API_BASE}/{{namespace}}/{{name}}/{{system}}")
 async def get_latest_module(
     namespace: str,
     name: str,
-    provider: str,
+    system: str,
     db: Session = Depends(get_db)
 ):
     """Get the latest version of a module"""
     latest_version = db.query(ModuleVersion).join(Module).filter(
         Module.namespace == namespace,
         Module.name == name,
-        Module.provider == provider
+        Module.provider == system
     ).order_by(ModuleVersion.version.desc()).first()
     
     if not latest_version:
@@ -337,7 +438,7 @@ async def get_latest_module(
         "namespace": namespace,
         "name": name,
         "version": latest_version.version,
-        "provider": provider,
+        "provider": system,
         "description": latest_version.description,
         "source": latest_version.repository_url,
         "published_at": latest_version.created_at.isoformat(),
@@ -345,11 +446,11 @@ async def get_latest_module(
         "verified": False
     }
 
-@app.get("/v1/modules/{namespace}/{name}/{provider}/{version}")
+@app.get(f"{API_BASE}/{{namespace}}/{{name}}/{{system}}/{{version}}")
 async def get_module_version(
     namespace: str,
     name: str,
-    provider: str,
+    system: str,
     version: str,
     db: Session = Depends(get_db)
 ):
@@ -357,7 +458,7 @@ async def get_module_version(
     module_version = db.query(ModuleVersion).join(Module).filter(
         Module.namespace == namespace,
         Module.name == name,
-        Module.provider == provider,
+        Module.provider == system,
         ModuleVersion.version == version
     ).first()
     
@@ -370,13 +471,49 @@ async def get_module_version(
         "namespace": namespace,
         "name": name,
         "version": version,
-        "provider": provider,
+        "provider": system,
         "description": module_version.description,
         "source": module_version.repository_url,
         "published_at": module_version.created_at.isoformat(),
         "downloads": 0,  # TODO: Implement download counting
         "verified": False
     }
+
+@app.get(f"{API_BASE}/{{namespace}}/{{name}}/{{system}}/archive/module.zip")
+async def download_module_archive(
+    namespace: str,
+    name: str,
+    system: str,
+    version: str,
+    db: Session = Depends(get_db)
+):
+    """Download the module archive zip file"""
+    try:
+        module_version = db.query(ModuleVersion).join(Module).filter(
+            Module.namespace == namespace,
+            Module.name == name,
+            Module.provider == system,
+            ModuleVersion.version == version
+        ).first()
+        
+        if not module_version:
+            raise HTTPException(status_code=404, detail="Module version not found")
+            
+        if not module_version.source_zip or not os.path.exists(module_version.source_zip):
+            raise HTTPException(status_code=404, detail="Module archive not found")
+            
+        # Return the actual zip file
+        return FileResponse(
+            module_version.source_zip,
+            media_type="application/zip",
+            filename=f"{namespace}-{name}-{system}-{version}.zip"
+        )
+        
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Error downloading module archive: {str(e)}")
+        raise HTTPException(status_code=500, detail="Error accessing module archive")
 
 if __name__ == "__main__":
     import uvicorn

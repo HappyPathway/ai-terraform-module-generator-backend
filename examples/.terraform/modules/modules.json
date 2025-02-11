@@ -1,0 +1,1 @@
+{"Modules":[{"Key":"","Source":"","Dir":"."},{"Key":"test_vpc","Source":"registry.local/HappyPathway/tfvpc/aws","Version":"1.0.0","Dir":".terraform/modules/test_vpc"}]}

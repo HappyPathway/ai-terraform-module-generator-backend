@@ -20,7 +20,13 @@ def create_access_token(data: dict, expires_delta: Optional[timedelta] = None):
 
 async def verify_token(credentials: HTTPAuthorizationCredentials = Security(security)):
     try:
-        payload = jwt.decode(credentials.credentials, SECRET_KEY, algorithms=[ALGORITHM])
+        # Verify token without checking issuer/audience claims
+        payload = jwt.decode(
+            credentials.credentials, 
+            SECRET_KEY, 
+            algorithms=[ALGORITHM],
+            options={"verify_aud": False}  # Don't verify audience claim
+        )
         return payload
     except jwt.ExpiredSignatureError:
         raise HTTPException(status_code=401, detail="Token has expired")

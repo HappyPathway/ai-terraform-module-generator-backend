@@ -1,6 +1,6 @@
 services:
   redis:
-    image: redis:latest
+    image: redis:alpine
     ports:
       - "6379:6379"
     volumes:
@@ -12,21 +12,46 @@ services:
       timeout: 3s
       retries: 5
 
+  nginx:
+    image: nginx:alpine
+    ports:
+      - "80:80"
+      - "443:443"
+    volumes:
+      - ./nginx/conf.d:/etc/nginx/conf.d
+      - ./nginx/certs:/etc/nginx/certs
+    depends_on:
+      - backend
+    networks:
+      default:
+        aliases:
+          - registry.local
+
   backend:
     build: .
+    expose:
+      - "8000"
     ports:
       - "8000:8000"
     volumes:
       - .:/app
+      - ./module_storage:/app/module_storage
+      - ./modules.db:/app/modules.db
     environment:
       - REDIS_HOST=redis
       - REDIS_PORT=6379
       - GITHUB_TOKEN=${GITHUB_TOKEN}
       - PYTHONPATH=/app
+      - REGISTRY_DOMAIN=registry.local
+      - JWT_SECRET_KEY=${JWT_SECRET_KEY}
     depends_on:
       redis:
         condition: service_healthy
-    command: uvicorn app.main:app --host 0.0.0.0 --reload
+    command: uvicorn app.main:app --host 0.0.0.0 --port 8000 --reload
 
 volumes:
   redis_data:
+
+networks:
+  default:
+    name: registry_network

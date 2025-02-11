@@ -12,39 +12,54 @@ class TerraformModuleClientError(Exception):
     pass
 
 class TerraformModuleClient:
-    def __init__(self, base_url: str = "http://localhost:8000", token: Optional[str] = None):
+    def __init__(self, base_url: str = "http://localhost:8000", token: Optional[str] = None, verify_ssl: bool = True):
         self.base_url = base_url.rstrip('/')
         self.token = token or os.getenv('TERRAFORM_MODULE_TOKEN')
+        self.verify_ssl = verify_ssl
         self.headers = {
-            "Authorization": f"Bearer {self.token}" if self.token else ""
+            "Authorization": f"Bearer {self.token}" if self.token else None
         }
+        # Remove None values from headers
+        self.headers = {k: v for k, v in self.headers.items() if v is not None}
 
     def _make_request(self, method: str, endpoint: str, **kwargs) -> Dict[str, Any]:
         """Make HTTP request with error handling"""
         try:
             url = f"{self.base_url}/{endpoint.lstrip('/')}"
             logger.debug(f"Making {method} request to {url}")
-            logger.debug(f"Request headers: {self.headers}")
-            logger.debug(f"Request kwargs: {kwargs}")
+            
+            # Create safe copy of headers for logging
+            safe_headers = self.headers.copy()
+            if 'Authorization' in safe_headers:
+                safe_headers['Authorization'] = 'Bearer [REDACTED]'
+            logger.debug(f"Request headers: {safe_headers}")
+            
+            if 'params' in kwargs:
+                logger.debug(f"Request params: {kwargs['params']}")
             
             start_time = time.time()
-            response = requests.request(method, url, headers=self.headers, **kwargs)
+            response = requests.request(method, url, headers=self.headers, verify=self.verify_ssl, **kwargs)
             request_time = time.time() - start_time
             
             logger.debug(f"Response received in {request_time:.2f} seconds")
             logger.debug(f"Response status: {response.status_code}")
-            logger.debug(f"Response headers: {dict(response.headers)}")
+            
+            # Create safe copy of response headers for logging
+            safe_response_headers = dict(response.headers)
+            if 'Authorization' in safe_response_headers:
+                safe_response_headers['Authorization'] = '[REDACTED]'
+            logger.debug(f"Response headers: {safe_response_headers}")
             
             try:
                 response.raise_for_status()
                 return response.json()
             except requests.exceptions.JSONDecodeError:
                 logger.error("Failed to decode JSON response")
-                logger.debug(f"Raw response content: {response.text}")
+                logger.debug("Response had invalid JSON format")
                 raise
                 
         except requests.exceptions.RequestException as e:
-            logger.error(f"Request failed: {e}")
+            logger.error(f"Request failed: {str(e)}")
             raise TerraformModuleClientError(f"API request failed: {e}")
 
     def discover_endpoints(self) -> Dict[str, Any]:
@@ -80,15 +95,24 @@ class TerraformModuleClient:
                 files = {'file': ('module.zip', f)}
                 logger.debug("Sending POST request...")
                 start_time = time.time()
-                response = self._make_request(
-                    "POST",
-                    f"api/modules/{namespace}/{name}/{provider}/{version}/upload",
-                    files=files
-                )
-                upload_time = time.time() - start_time
-                logger.debug(f"Upload request completed in {upload_time:.2f} seconds")
-                logger.debug(f"Upload response: {response}")
-                return response
+                try:
+                    response = self._make_request(
+                        "POST",
+                        f"api/modules/{namespace}/{name}/{provider}/{version}/upload",
+                        files=files
+                    )
+                    upload_time = time.time() - start_time
+                    logger.debug(f"Upload request completed in {upload_time:.2f} seconds")
+                    logger.debug(f"Upload response: {response}")
+                    return response
+                except requests.exceptions.HTTPError as e:
+                    if e.response.status_code == 409:
+                        # Version conflict - provide more helpful error message
+                        raise TerraformModuleClientError(
+                            f"Version {version} already exists for module {namespace}/{name}/{provider}. "
+                            "Please increment the version number and try again."
+                        )
+                    raise TerraformModuleClientError(f"Module upload failed: {str(e)}")
                 
         except Exception as e:
             logger.error(f"Upload failed: {str(e)}", exc_info=True)

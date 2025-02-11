@@ -5,6 +5,11 @@ import zipfile
 import tempfile
 import logging
 import time
+import urllib3
+import semver
+
+# Disable SSL verification warnings
+urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
 
 logging.basicConfig(level=logging.DEBUG)
 logger = logging.getLogger(__name__)
@@ -15,18 +20,66 @@ def create_module_zip(module_path: str, output_path: str):
     logger.debug(f"Creating zip from absolute path: {abs_module_path}")
     
     with zipfile.ZipFile(output_path, 'w', zipfile.ZIP_DEFLATED) as zipf:
-        for root, _, files in os.walk(abs_module_path):
-            for file in files:
-                file_path = os.path.join(root, file)
-                rel_path = os.path.relpath(file_path, abs_module_path)
-                logger.debug(f"Adding file to zip: {file_path} as {rel_path}")
-                zipf.write(file_path, rel_path)
+        # Only include .tf files at the root of the module
+        for filename in os.listdir(abs_module_path):
+            if filename.endswith('.tf'):
+                file_path = os.path.join(abs_module_path, filename)
+                logger.debug(f"Adding file to zip: {file_path} as {filename}")
+                # Add file at the root level in zip
+                zipf.write(file_path, filename)
+                
+        # Log the contents of the zip after creation
+        logger.debug("\nZip contents:")
+        for info in zipf.filelist:
+            logger.debug(f"  - {info.filename} ({info.file_size} bytes)")
+
+def get_next_version(client: TerraformModuleClient, module_info: dict) -> str:
+    """Get the next version number for a module"""
+    try:
+        versions = client.list_versions(
+            module_info['namespace'],
+            module_info['name'],
+            module_info['provider']
+        )
+        
+        # Always start with version 1.0.0 if no versions exist
+        if not versions or 'modules' not in versions or not versions['modules']:
+            logger.info("No existing versions found, starting with 1.0.0")
+            return "1.0.0"
+            
+        existing_versions = versions.get('modules', [{}])[0].get('versions', [])
+        if not existing_versions:
+            logger.info("No existing versions array found, starting with 1.0.0")
+            return "1.0.0"
+            
+        version_numbers = [v.get('version') for v in existing_versions if v.get('version')]
+        if not version_numbers:
+            logger.info("No valid version numbers found, starting with 1.0.0")
+            return "1.0.0"
+            
+        # Get highest version
+        highest_version = max(version_numbers, key=lambda v: semver.VersionInfo.parse(v))
+        logger.debug(f"Current highest version: {highest_version}")
+        
+        # Increment patch version
+        next_version = str(semver.VersionInfo.parse(highest_version).bump_patch())
+        logger.debug(f"Next version will be: {next_version}")
+        return next_version
+        
+    except Exception as e:
+        logger.warning(f"Error getting versions, using 1.0.0: {str(e)}")
+        return "1.0.0"
 
 def upload_module(client, module_info: dict, zip_path: str) -> bool:
     """Upload a module and verify it was uploaded successfully"""
     try:
         logger.debug("Starting module upload...")
         start_time = time.time()
+        
+        # Get next version
+        version = get_next_version(client, module_info)
+        logger.info(f"Using version: {version}")
+        module_info['version'] = version
         
         logger.debug(f"Preparing to upload module with info: {module_info}")
         logger.debug(f"ZIP file path: {zip_path}")
@@ -70,26 +123,29 @@ def upload_module(client, module_info: dict, zip_path: str) -> bool:
         logger.error(f"Upload failed: {str(e)}", exc_info=True)
         return False
 
-def main():
-    # Initialize client with auth token
-    token = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJzdWIiOiJ0ZXN0LXVzZXIiLCJwZXJtaXNzaW9ucyI6WyJyZWFkOm1vZHVsZSIsIndyaXRlOm1vZHVsZSIsInVwbG9hZDptb2R1bGUiLCJnZW5lcmF0ZTptb2R1bGUiXSwiZXhwIjoxNzM5MTgwMjYwfQ.RgN6X1ws2iKDor1YSLRHmVgngLzcmHeSxdD5Pz_r1OQ"
-    client = TerraformModuleClient(base_url="http://localhost:8000", token=token)
+def main(version: str):
+    # Initialize client with auth token - load from environment variable
+    token = os.getenv("TERRAFORM_MODULE_TOKEN")
+    if not token:
+        raise ValueError("TERRAFORM_MODULE_TOKEN environment variable must be set")
+        
+    client = TerraformModuleClient(base_url="https://registry.local", token=token, verify_ssl=False)
     
     # Paths to our test modules
     modules = [
         {
             "path": "module_storage/test/aws-vpc",
-            "namespace": "testns",
+            "namespace": "HappyPathway",
             "name": "tfvpc",
             "provider": "aws",
-            "version": "1.0.0"
+            "version": version  # This will be used as default for new modules
         },
         {
             "path": "module_storage/test/azure-storage",
-            "namespace": "testns",
+            "namespace": "HappyPathway",
             "name": "tfstorage",
             "provider": "azure",
-            "version": "1.0.0"
+            "version": version  # This will be used as default for new modules
         }
     ]
 
@@ -113,4 +169,8 @@ def main():
                 logger.error(f"Failed to process module {module['name']}")
 
 if __name__ == "__main__":
-    main()
+    from argparse import ArgumentParser
+    parser = ArgumentParser()
+    parser.add_argument("--version", type=str, default="1.0.0")
+    args = parser.parse_args()
+    main(args.version)
